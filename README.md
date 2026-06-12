@@ -118,7 +118,7 @@ flagos-track3/
 
 ## Demo Video
 
-https://github.com/zan-maker/minescope/blob/main/docs/demo-video-v3.mp4
+https://github.com/icohangar-ops/Minescope/blob/main/docs/demo-video-v3.mp4
 
 ---
 
