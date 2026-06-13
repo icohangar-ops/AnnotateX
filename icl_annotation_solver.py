@@ -29,6 +29,8 @@ import pandas as pd
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
+from cubiczan_resilience import resilient, atomic_write
+
 
 # ============================================================
 # CONFIGURATION
@@ -42,6 +44,7 @@ class Config:
     SELF_CONSISTENCY_RUNS = 1
     USE_4BIT = True
     MAX_INPUT_TOKENS = 30000
+    MAX_PREDICT_ATTEMPTS = 3
 
     INPUT_DIR = "/kaggle/input/track-3-llm-automatic-data-annotation-in-long-context-scenarios"
     OUTPUT_PATH = "/kaggle/working/submission.csv"
@@ -253,6 +256,7 @@ class ICLEngine:
 
         print(f"Model loaded in {time.time()-t0:.1f}s")
 
+    @resilient(timeout=300, max_attempts=3)
     def generate(self, prompt: str, temperature: float = None) -> str:
         """Generate model response."""
         inputs = self.tokenizer(
@@ -293,6 +297,7 @@ class ICLEngine:
         """Process all test samples across all tasks."""
         task_lookup = {t['task_id']: t for t in loader.tasks}
         predictions = []
+        errors = []
         total = len(loader.all_test_samples)
         start = time.time()
 
@@ -304,11 +309,31 @@ class ICLEngine:
                 eta = elapsed / (i + 1) * (total - i - 1) if i > 0 else 0
                 print(f"[{i+1}/{total}] {task['task_id'][:25]:25s} | ETA: {eta/60:.1f}m")
 
-            try:
-                answer = self.predict(task, sample['input'])
-            except Exception as e:
-                print(f"  ERROR {sample['id']}: {e}")
-                answer = ""
+            answer = ""
+            last_exc = None
+            for attempt in range(self.config.MAX_PREDICT_ATTEMPTS):
+                try:
+                    answer = self.predict(task, sample['input'])
+                    last_exc = None
+                    break
+                except Exception as e:
+                    last_exc = e
+                    print(f"  ERROR {sample['id']} (attempt {attempt+1}"
+                          f"/{self.config.MAX_PREDICT_ATTEMPTS}): "
+                          f"{type(e).__name__}: {e}")
+                    # Free GPU memory between attempts before retrying.
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+            if last_exc is not None:
+                # All attempts exhausted: fall back to empty answer but record
+                # the failure so it is auditable in the sidecar file.
+                errors.append({
+                    'id': sample['id'],
+                    'task_id': sample['task_id'],
+                    'exc_type': type(last_exc).__name__,
+                    'message': str(last_exc),
+                })
 
             predictions.append({'ID': sample['id'], 'Predicted': answer})
 
@@ -317,8 +342,24 @@ class ICLEngine:
 
         elapsed = time.time() - start
         print(f"\nDone! {total} samples in {elapsed/60:.1f}m ({elapsed/total:.1f}s/sample)")
+        if errors:
+            print(f"WARNING: {len(errors)} sample(s) failed all "
+                  f"{self.config.MAX_PREDICT_ATTEMPTS} attempts; see error sidecar.")
 
+        self._last_errors = errors
         return pd.DataFrame(predictions)
+
+    def flush_errors(self, submission_path: str) -> Optional[str]:
+        """Write any collected prediction errors to a sidecar file alongside
+        the submission so failures are auditable. Returns the sidecar path,
+        or None if there were no errors."""
+        errors = getattr(self, '_last_errors', None)
+        if not errors:
+            return None
+        sidecar = os.path.splitext(submission_path)[0] + ".errors.json"
+        atomic_write(sidecar, json.dumps(errors, indent=2, ensure_ascii=False))
+        print(f"Error sidecar written: {sidecar} ({len(errors)} failures)")
+        return sidecar
 
 
 # ============================================================
@@ -348,6 +389,9 @@ def main():
     # Save
     os.makedirs(os.path.dirname(config.OUTPUT_PATH), exist_ok=True)
     sub_df.to_csv(config.OUTPUT_PATH, index=False)
+
+    # Persist any prediction failures alongside the submission for auditing.
+    engine.flush_errors(config.OUTPUT_PATH)
 
     print(f"\nSubmission saved: {config.OUTPUT_PATH}")
     print(f"Rows: {len(sub_df)}, Columns: {list(sub_df.columns)}")
