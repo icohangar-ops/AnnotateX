@@ -1,0 +1,180 @@
+# evidence/matrix.yaml — every capability claim bound to deterministic evidence.
+# Authored per the Cubiczan evidence-matrix spec (schema v1). Canonical verifier:
+# tools/verify_evidence_matrix.py, canonical kit:
+# icohangar-ops/consensus-hardening-protocol (vendored byte-identical, v1.0.0).
+#
+# Row shape (schema v1):
+# - id: C001                      # unique, stable, C-prefixed
+#   claim: >-                     # verbatim or tight paraphrase of the stated claim
+#   source: "README.md#anchor"    # locator where the claim is made; file must exist
+#   evidence:                     # >= 1 ref; empty list is a failure
+#     - type: test                # test | script | manifest_field | artifact_hash
+#       ref: "tests/test_engine.py::test_name"
+#     - type: script
+#       ref: "scripts/verify_repo_artifacts.py"
+#       timeout_seconds: 120
+#     - type: artifact_hash
+#       ref: "Technical_Report.pdf"
+#       sha256: "64-hex pin"
+#
+# Note: this repo commits no JSON/YAML manifest, so manifest_field rows are not
+# applicable; configuration facts are pinned by tests against the committed
+# sources instead.
+schema_version: 1
+repo: AnnotateX
+claims:
+  - id: C001
+    claim: >-
+      The annotation engine is an ICL pipeline built on Qwen3-4B with pinned
+      generation settings (temperature 0.1, top-p 0.85, 5-shot prompting,
+      30,000-token input window).
+    source: "README.md#technical-architecture"
+    evidence:
+      - type: test
+        ref: "tests/test_engine.py::test_config_pins_qwen3_4b_and_generation_settings"
+  - id: C002
+    claim: >-
+      Model loading requests NF4 4-bit quantization (BitsAndBytesConfig with
+      load_in_4bit, nf4 quant type, double quantization, fp16 compute dtype)
+      when USE_4BIT is enabled, for memory-efficient deployment.
+    source: "README.md#key-technologies"
+    evidence:
+      - type: test
+        ref: "tests/test_engine.py::test_load_model_configures_nf4_quantization"
+  - id: C003
+    claim: >-
+      Few-shot selection is balanced per-label sampling for binary
+      classification tasks and uniform random sampling for all other tasks
+      (reworded from the original "embedding-based similarity clustering"
+      claim, which named no code path that exists in this tree).
+    source: "README.md#our-solution"
+    evidence:
+      - type: test
+        ref: "tests/test_engine.py::test_prompt_builder_balances_binary_classification_shots"
+      - type: test
+        ref: "tests/test_engine.py::test_prompt_builder_uniform_sampling_for_non_binary_tasks"
+  - id: C004
+    claim: >-
+      Prompts are few-shot ICL prompts that request answer-only output per the
+      task definition (reworded from the original "Chain-of-Thought: forces
+      the model to reason step-by-step" claim; the committed system prompt
+      explicitly requests only the answer, with no CoT scaffold).
+    source: "README.md#our-solution"
+    evidence:
+      - type: test
+        ref: "tests/test_engine.py::test_system_prompt_requests_answer_only_output"
+  - id: C005
+    claim: >-
+      Self-consistency decoding with majority voting is available when
+      SELF_CONSISTENCY_RUNS is set above 1; the committed default is 1 run
+      (single pass), so no multi-pass voting happens out of the box.
+    source: "README.md#our-solution"
+    evidence:
+      - type: test
+        ref: "tests/test_engine.py::test_self_consistency_majority_vote_resolves"
+      - type: test
+        ref: "tests/test_engine.py::test_self_consistency_defaults_to_single_run"
+  - id: C006
+    claim: >-
+      Long inputs are handled by tokenizer-level truncation at
+      MAX_INPUT_TOKENS = 30000 (inside Qwen3-4B's 32K window); no document
+      chunking or semantic-relevance selection is implemented (reworded from
+      the original "intelligent context truncation and document chunking"
+      claim).
+    source: "README.md#our-solution"
+    evidence:
+      - type: test
+        ref: "tests/test_engine.py::test_generate_truncates_long_inputs_at_max_input_tokens"
+  - id: C007
+    claim: >-
+      Model responses are normalized into task labels by AnswerExtractor:
+      known-label matching first, then an "Output:" pattern, then thinking-tag
+      stripping, then a first-line fallback.
+    source: "README.md#technical-architecture"
+    evidence:
+      - type: test
+        ref: "tests/test_engine.py::test_extractor_matches_known_label_first"
+      - type: test
+        ref: "tests/test_engine.py::test_extractor_output_pattern"
+      - type: test
+        ref: "tests/test_engine.py::test_extractor_think_tag_and_first_line_fallback"
+  - id: C008
+    claim: >-
+      Generation is wrapped by cubiczan_resilience's resilient decorator
+      (timeout 300s, max_attempts 3), retrying transient failures with
+      exponential backoff.
+    source: "README.md#reliability--resilience"
+    evidence:
+      - type: test
+        ref: "tests/test_engine.py::test_generate_retries_transient_failures_under_resilient"
+      - type: test
+        ref: "tests/test_engine.py::test_generate_carries_resilient_decorator"
+  - id: C009
+    claim: >-
+      Each sample is retried up to MAX_PREDICT_ATTEMPTS = 3; exhausted
+      failures fall back to an empty prediction and are recorded in an
+      auditable error sidecar (<submission>.errors.json) written atomically
+      via cubiczan_resilience.atomic_write.
+    source: "README.md#reliability--resilience"
+    evidence:
+      - type: test
+        ref: "tests/test_engine.py::test_run_all_retries_each_sample_up_to_max_attempts"
+      - type: test
+        ref: "tests/test_engine.py::test_run_all_records_exhausted_failures_in_error_sidecar"
+  - id: C010
+    claim: >-
+      Inference is sequential per sample (no batched generation);
+      device_map="auto" with fp16 weights allows the model to shard across
+      available GPUs (reworded from the original "batch processing capable on
+      single or multi-GPU setups" claim).
+    source: "README.md#performance-characteristics"
+    evidence:
+      - type: test
+        ref: "tests/test_engine.py::test_load_model_uses_device_map_auto_and_fp16"
+  - id: C011
+    claim: >-
+      The repository contains the code and artifacts the README's structure
+      block lists (engine, report generator, Kaggle notebook, media, logo,
+      technical report), and all code and the competition notebook are
+      available in this repository (reworded from the original claim that
+      "evaluation scripts" are published — none exist in this tree).
+    source: "README.md#github-repository"
+    evidence:
+      - type: script
+        ref: "scripts/verify_repo_artifacts.py"
+        timeout_seconds: 120
+  - id: C012
+    claim: >-
+      The demo video referenced by the README is committed in this repository
+      at demo-video.mp4 (reworded from the original external Minescope link,
+      which pointed at a different project's media).
+    source: "README.md#demo-video"
+    evidence:
+      - type: artifact_hash
+        ref: "demo-video.mp4"
+        sha256: "204d58a5d47ff8e79665bb10cb012aaefda924633e2d2be4a2bde3208247752e"
+      - type: script
+        ref: "scripts/verify_repo_artifacts.py"
+        timeout_seconds: 120
+  - id: C013
+    claim: >-
+      A technical report is committed at Technical_Report.pdf and is
+      regenerable with generate_report.py (reworded from the original claim
+      that the report "includes detailed ablation studies", which is not a
+      deterministically checkable statement).
+    source: "README.md#open-source--community"
+    evidence:
+      - type: artifact_hash
+        ref: "Technical_Report.pdf"
+        sha256: "cb9e5b3b10ace4c9c196d6d99598041e1b33b3ee8fb5a7ed08884c41fd0c8fd7"
+  - id: C014
+    claim: >-
+      The README's "Built With" list names the dependencies this repo actually
+      pins: numpy, pandas, torch, transformers, and cubiczan-resilience
+      (reworded from the original list, which named FlagScale and FlagGems
+      although neither appears in the requirements or the code).
+    source: "README.md#built-with"
+    evidence:
+      - type: script
+        ref: "scripts/verify_declared_dependencies.py"
+        timeout_seconds: 120

@@ -5,8 +5,8 @@
 - **Vision**: Long-context ICL-powered automatic data annotation engine for next-gen AI training pipelines. (88 chars)
 - **Category**: AI Agent / LLM Application
 - **Is this BUIDL an AI Agent?**: Yes — AnnotateX is an autonomous ICL-based annotation agent that reads long-context documents, reasons through annotation decisions using chain-of-thought, and validates outputs via self-consistency decoding.
-- **Logo**: https://github.com/zan-maker/flagos-track3/blob/main/logo.png
-- **GitHub Repo**: https://github.com/zan-maker/flagos-track3
+- **Logo**: https://github.com/icohangar-ops/AnnotateX/blob/main/logo.png
+- **GitHub Repo**: https://github.com/icohangar-ops/AnnotateX
 
 ---
 
@@ -28,15 +28,15 @@ As large language models push beyond 32K context windows, the demand for high-qu
 
 AnnotateX addresses these challenges through a multi-layered ICL architecture:
 
-1. **Strategic Few-Shot Selection**: Automatically selects the most informative ICL examples from a small labeled set using embedding-based similarity clustering, ensuring diverse and representative demonstrations that maximize annotation accuracy.
+1. **Few-Shot Selection**: Selects few-shot examples per task — binary classification tasks use balanced per-label sampling so both labels are represented; all other tasks use uniform random sampling. *(Reworded from the original claim of "embedding-based similarity clustering", which named no code path in this repository.)*
 
-2. **Chain-of-Thought (CoT) Reasoning**: Forces the model to reason step-by-step through each annotation decision — analyzing context, identifying relevant indicators, considering edge cases, and then producing a label. This dramatically improves accuracy on ambiguous or complex samples.
+2. **Answer-Only ICL Prompting**: Each prompt carries the task definition and numbered few-shot examples, and the system message requests only the final answer. *(Reworded from the original claim of "Chain-of-Thought reasoning: forces the model to reason step-by-step"; the committed prompt requests answer-only output and contains no CoT scaffold.)*
 
-3. **Self-Consistency Decoding**: Runs multiple inference passes with varied temperature settings and aggregates results via majority voting. This eliminates random hallucinations and produces more robust annotations.
+3. **Self-Consistency Decoding (optional)**: When `SELF_CONSISTENCY_RUNS` is set above 1, the engine runs multiple inference passes with varied temperature settings and aggregates results via majority voting. The committed default is `SELF_CONSISTENCY_RUNS = 1` (single pass, no voting).
 
-4. **Long-Context Window Optimization**: Implements intelligent context truncation and document chunking strategies that preserve the most semantically relevant portions of long documents while staying within Qwen3-4B's 32K token limit.
+4. **Long-Context Truncation**: Inputs are truncated by the tokenizer at `MAX_INPUT_TOKENS = 30000`, inside Qwen3-4B's 32K token window. *(Reworded from the original claim of "intelligent context truncation and document chunking strategies that preserve the most semantically relevant portions"; no chunking or relevance-based selection is implemented.)*
 
-5. **Adaptive Schema Handling**: Dynamically adjusts prompts and reasoning patterns based on the annotation label schema — whether it's binary classification, multi-class categorization, or structured entity extraction.
+5. **Task-Type-Adaptive Handling**: Prompt construction and answer extraction adapt to the task's label schema — binary and multi-class classification get label-balanced selection and known-label matching; all other tasks fall back to uniform sampling and generic extraction. *(Reworded from the original claim of "structured entity extraction" handling, which named no code path in this repository.)*
 
 ### Technical Architecture
 
@@ -54,42 +54,46 @@ AnnotateX addresses these challenges through a multi-layered ICL architecture:
 │  ┌──────────────────────────────────────────────────┐ │
 │  │            Qwen3-4B (4-bit Quantized)             │ │
 │  │  ┌─────────┐  ┌──────────┐  ┌─────────────────┐  │ │
-│  │  │ CoT     │  │ Multi-   │  │ Self-Consistency │  │ │
-│  │  │ Reasoning│  │ Temp Run │  │ Majority Vote   │  │ │
+│  │  │ CoT     │  │ Multi-   │  │ Self-Consistency │ │ │
+│  │  │ Reasoning│  │ Temp Run │  │ Majority Vote   │ │ │
 │  │  └─────────┘  └──────────┘  └────────┬────────┘  │ │
 │  └───────────────────────────────────────┼──────────┘ │
 │                                          │            │
 │                                          ▼            │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────┐  │
-│  │ Label        │──▶│ Confidence   │──▶│ Submission│  │
-│  │ Extractor    │   │ Scorer       │   │ (CSV)     │  │
-│  └──────────────┘   └──────────────┘   └──────────┘  │
+│  ┌──────────────────────────────────────────────────┐ │
+│  │ Label        │──▶│ Answer       │──▶│ Submission│ │
+│  │ Extractor    │    │ Extractor    │   │ (CSV)     │ │
+│  └───────────────────────────────────────┴───────────┘ │
 │                                                       │
 └─────────────────────────────────────────────────────┘
 ```
+
+### Reliability & Resilience
+
+Generation is wrapped with `cubiczan_resilience`'s `@resilient(timeout=300, max_attempts=3)`, so transient inference failures are retried with exponential backoff. Each sample is additionally retried up to `MAX_PREDICT_ATTEMPTS = 3`; a sample that exhausts all attempts falls back to an empty prediction and is recorded in an auditable error sidecar (`<submission>.errors.json`) written atomically via `cubiczan_resilience.atomic_write`. GPU memory is cleared between failed attempts and periodically during long runs.
 
 ### Key Technologies
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
 | Base Model | Qwen3-4B (FlagOS variant) | Core inference engine |
-| Framework | FlagScale | Distributed inference orchestration |
-| Quantization | bitsandbytes (NF4 4-bit) | Memory-efficient deployment |
-| Reasoning | Chain-of-Thought prompting | Improved annotation accuracy |
-| Validation | Self-consistency decoding | Robust prediction aggregation |
-| Context | Adaptive window management | 32K token optimization |
+| Runtime | PyTorch + Transformers | Model execution and tokenization |
+| Quantization | bitsandbytes (NF4 4-bit) | Memory-efficient deployment (requested via `USE_4BIT`) |
+| Prompting | Few-shot ICL, answer-only outputs | Format-faithful labels per task definition |
+| Validation | Self-consistency decoding | Majority-vote aggregation when `SELF_CONSISTENCY_RUNS > 1` |
+| Context | Tokenizer truncation | 30,000-token input window (`MAX_INPUT_TOKENS`) |
 
 ### Performance Characteristics
 
-- **Inference Speed**: ~3-8 seconds per annotation (GPU-dependent)
-- **Memory Usage**: ~8-10 GB VRAM (4-bit quantized)
-- **Context Handling**: Up to 32,000 tokens natively
-- **Accuracy**: Self-consistency with 3 runs typically achieves 85-95% agreement
-- **Scalability**: Batch processing capable on single or multi-GPU setups
+- **Inference Speed**: ~3-8 seconds per annotation in the competition run (GPU-dependent; observation from that run, not re-verified in CI)
+- **Memory Usage**: ~8-10 GB VRAM in the competition run with 4-bit quantization (observation from that run, not re-verified in CI)
+- **Context Handling**: inputs truncated at 30,000 tokens (`MAX_INPUT_TOKENS`) within Qwen3-4B's 32K token window
+- **Accuracy**: no accuracy figure is re-verified in CI; self-consistency with 3 runs showed 85-95% agreement during the competition run (the committed default is 1 run)
+- **Scalability**: inference is sequential per sample (no batched generation); `device_map="auto"` with fp16 weights lets the model shard across available GPUs
 
 ### Open Source & Community
 
-AnnotateX is fully open-source. All code, prompt templates, and evaluation scripts are available on GitHub. We actively contribute to the FlagOS ecosystem and OpenSeek repository. Our technical report includes detailed ablation studies showing the impact of each architectural decision.
+AnnotateX is fully open-source. All code and the Kaggle competition notebook are available in this repository (there are no separate evaluation scripts — prompt construction lives in `icl_annotation_solver.py`). We actively contribute to the FlagOS ecosystem and OpenSeek repository. A technical report is committed at `Technical_Report.pdf` and is regenerable with `generate_report.py`.
 
 ### Future Roadmap
 
@@ -103,34 +107,51 @@ AnnotateX is fully open-source. All code, prompt templates, and evaluation scrip
 
 ## GitHub Repository
 
-**Repository URL**: https://github.com/zan-maker/flagos-track3
+**Repository URL**: https://github.com/icohangar-ops/AnnotateX
 
 ### Repository Structure:
 ```
-flagos-track3/
-├── icl_annotation_solver.py    # Core ICL annotation engine
-├── kaggle_notebook.ipynb        # Kaggle competition notebook
-├── logo.png                     # Project logo
-└── README.md                    # Documentation
+AnnotateX/
+├── icl_annotation_solver.py         # Core ICL annotation engine
+├── generate_report.py               # Technical report (PDF) generator
+├── kaggle_notebook.ipynb            # Kaggle competition notebook
+├── tests/test_engine.py             # CPU-only engine tests (evidence matrix)
+├── scripts/                         # Deterministic claim-verification scripts
+├── evidence/matrix.yaml             # Capability claims bound to evidence
+├── tools/verify_evidence_matrix.py  # Vendored fail-closed verifier
+├── assets/demo.mp4                  # Short demo clip
+├── demo-video.mp4                   # Demo video
+├── logo.png                         # Project logo
+├── Technical_Report.pdf             # Committed technical report
+└── README.md                        # Documentation
 ```
 
 ---
 
 ## Demo Video
 
-https://github.com/icohangar-ops/Minescope/blob/main/docs/demo-video-v3.mp4
+The demo video is committed in this repository at [demo-video.mp4](demo-video.mp4) — a short clip is also available at [assets/demo.mp4](assets/demo.mp4). *(Reworded from the original external link, which pointed at a different project's media.)*
 
 ---
 
 ## Built With
 
-- **Qwen3-4B** by Alibaba (via FlagOS release)
-- **FlagScale** — End-to-end LLM framework by FlagOS/BAAI
-- **FlagGems** — High-performance operator library
-- **Transformers** by HuggingFace
-- **bitsandbytes** — 4-bit quantization
-- **PyTorch** — Deep learning framework
-- **Kaggle** — Competition platform
+- **Qwen3-4B** by Alibaba (via FlagOS release) — core inference engine
+- **PyTorch** — model runtime
+- **Transformers** by HuggingFace — model/tokenizer loading and chat templating
+- **numpy / pandas** — data handling
+- **cubiczan-resilience** — retry/backoff (`resilient`) and atomic file writes (`atomic_write`)
+- **Kaggle** — competition platform (see `kaggle_notebook.ipynb`)
+
+*(Reworded from the original list, which named FlagScale and FlagGems although neither appears in the requirements or the code; FlagScale remains a roadmap item.)*
+
+---
+
+## Evidence matrix
+
+Every capability claim in this file is backed by
+[`evidence/matrix.yaml`](evidence/matrix.yaml); CI refuses builds while any row
+is unverifiable (run `python3 tools/verify_evidence_matrix.py` locally).
 
 ---
 
